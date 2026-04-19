@@ -28,6 +28,8 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
+var version = "dev"
+
 const defaultPort = 8888
 
 type config struct {
@@ -55,6 +57,7 @@ type fileEntry struct {
 }
 
 func main() {
+	showVersion := flag.Bool("v", false, "print version and exit")
 	filePath := flag.String("f", "", "file to serve (send mode)")
 	port := flag.Int("p", defaultPort, "port to serve on")
 	receive := flag.Bool("r", false, "receive-only mode")
@@ -82,6 +85,11 @@ func main() {
 	}
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("bifrost %s\n", version)
+		os.Exit(0)
+	}
 
 	// Handle positional args: bifrost [flags] <file> [port]
 	// Go's flag package stops at first non-flag, so we also scan os.Args

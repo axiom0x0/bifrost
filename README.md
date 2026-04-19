@@ -11,16 +11,38 @@ Bridge files between your computer and phone via QR code. No cloud, no cables, n
 
 ## Install
 
+### Download a binary
+
+Grab the latest release for your platform from [Releases](https://github.com/axiom0x0/bifrost/releases):
+
+| Platform | Binary |
+|----------|--------|
+| Linux (x86_64) | `bifrost-linux-amd64` |
+| Linux (ARM64) | `bifrost-linux-arm64` |
+| macOS (Intel) | `bifrost-darwin-amd64` |
+| macOS (Apple Silicon) | `bifrost-darwin-arm64` |
+| Windows (x86_64) | `bifrost-windows-amd64.exe` |
+
+```bash
+# Example: Linux x86_64
+curl -LO https://github.com/axiom0x0/bifrost/releases/latest/download/bifrost-linux-amd64
+chmod +x bifrost-linux-amd64
+sudo mv bifrost-linux-amd64 /usr/local/bin/bifrost
+```
+
+### Go install
+
 ```bash
 go install github.com/axiom0x0/bifrost@latest
 ```
 
-Or build from source:
+### Build from source
 
 ```bash
 git clone https://github.com/axiom0x0/bifrost.git
 cd bifrost
-go build -o bifrost .
+make install    # builds and installs to ~/.local/bin/bifrost
+# or: make all  # cross-compile all platforms into dist/
 ```
 
 ## Usage
@@ -74,6 +96,7 @@ Generates a random AES-256-GCM key and embeds it in the QR code's URL fragment (
 | `-o` | Output directory for received files | `.` |
 | `-p` | Port to serve on | `8888` |
 | `-e` | Enable end-to-end encryption | `false` |
+| `-v` | Print version and exit | — |
 
 ## How it works
 
