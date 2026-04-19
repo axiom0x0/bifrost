@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bifrost</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .container { text-align: center; padding: 2rem; max-width: 420px; width: 100%; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .subtitle { color: #8b949e; margin-bottom: 1.5rem; font-size: 0.9rem; }
+    .section { margin-bottom: 2rem; }
+    .section-title { font-size: 1.1rem; margin-bottom: 0.75rem; color: #58a6ff; }
+
+    /* Download section */
+    .download-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 1.5rem; }
+    .download-card .filename { font-size: 1.1rem; font-weight: 600; word-break: break-all; }
+    .download-card .filesize { color: #8b949e; font-size: 0.85rem; margin-top: 0.25rem; }
+    .btn-download { display: inline-block; background: #1f6feb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 1rem; cursor: pointer; width: 100%; margin-top: 1rem; text-decoration: none; text-align: center; }
+    .btn-download:hover { background: #388bfd; }
+
+    /* Upload section */
+    .upload-area { border: 2px dashed #30363d; border-radius: 12px; padding: 2.5rem 1.5rem; cursor: pointer; transition: border-color 0.2s; }
+    .upload-area:hover, .upload-area.drag { border-color: #58a6ff; }
+    .upload-area .icon { font-size: 2rem; }
+    .upload-area p { color: #8b949e; margin-top: 0.5rem; font-size: 0.9rem; }
+    input[type="file"] { display: none; }
+    .btn-upload { background: #238636; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 1rem; cursor: pointer; width: 100%; margin-top: 1rem; }
+    .btn-upload:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+    .btn-upload:hover:not(:disabled) { background: #2ea043; }
+    .file-list { text-align: left; margin-top: 0.75rem; font-size: 0.85rem; color: #8b949e; }
+
+    .status { margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none; font-size: 0.9rem; }
+    .status.success { display: block; background: #0d1f0d; border: 1px solid #238636; color: #3fb950; }
+    .status.error { display: block; background: #1f0d0d; border: 1px solid #da3633; color: #f85149; }
+    .divider { border: none; border-top: 1px solid #21262d; margin: 1.5rem 0; }
+
+    .encrypted-badge { display: inline-block; background: #1a1e2e; border: 1px solid #388bfd; color: #58a6ff; font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🌈 Bifrost</h1>
+    <p class="subtitle">{{.Hostname}}</p>
+    {{if .Encrypted}}<span class="encrypted-badge">🔒 end-to-end encrypted</span><br><br>{{end}}
+
+    {{if .DownloadFile}}
+    <div class="section">
+      <div class="section-title">⬇ Download</div>
+      <div class="download-card">
+        <div class="filename">{{.DownloadFile}}</div>
+        <div class="filesize">{{.DownloadSize}}</div>
+        {{if .Encrypted}}
+        <a href="#" class="btn-download" id="downloadBtn" onclick="decryptAndDownload(event)">Download</a>
+        {{else}}
+        <a href="/download/{{.DownloadFile}}" class="btn-download">Download</a>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+
+    {{if .ShowUpload}}
+    {{if .DownloadFile}}<hr class="divider">{{end}}
+    <div class="section">
+      <div class="section-title">⬆ Upload</div>
+      <form id="form">
+        <div class="upload-area" id="dropzone" onclick="document.getElementById('files').click()">
+          <div class="icon">📁</div>
+          Tap to select files
+          <p>or drag &amp; drop</p>
+        </div>
+        <input type="file" id="files" name="files" multiple onchange="showFiles(this.files)">
+        <div class="file-list" id="filelist"></div>
+        <button type="submit" class="btn-upload" id="submit" disabled>Upload</button>
+      </form>
+      <div class="status" id="status"></div>
+    </div>
+    {{end}}
+  </div>
+
+  <script>
+    const ENCRYPTED = {{.Encrypted}};
+
+    function getKey() {
+      const frag = window.location.hash.substring(1);
+      if (!frag) return null;
+      const raw = atob(frag.replace(/-/g,'+').replace(/_/g,'/'));
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt','decrypt']);
+    }
+
+    function humanSize(b) {
+      if (b < 1024) return b + ' B';
+      const u = ['KB','MB','GB'];
+      let i = -1;
+      do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+      return b.toFixed(1) + ' ' + u[i];
+    }
+
+    // Upload logic
+    const dz = document.getElementById('dropzone');
+    const fi = document.getElementById('files');
+    if (dz) {
+      dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+      dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); fi.files = e.dataTransfer.files; showFiles(fi.files); });
+    }
+
+    function showFiles(files) {
+      const list = document.getElementById('filelist');
+      list.innerHTML = Array.from(files).map(f => '• ' + f.name + ' (' + humanSize(f.size) + ')').join('<br>');
+      document.getElementById('submit').disabled = files.length === 0;
+    }
+
+    const form = document.getElementById('form');
+    if (form) {
+      form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const btn = document.getElementById('submit');
+        const status = document.getElementById('status');
+        btn.disabled = true;
+        btn.textContent = 'Uploading...';
+        status.style.display = 'none';
+
+        try {
+          if (ENCRYPTED) {
+            await encryptedUpload(fi.files, status);
+          } else {
+            const fd = new FormData();
+            for (const f of fi.files) fd.append('files', f);
+            const resp = await fetch('/upload', { method: 'POST', body: fd });
+            const text = await resp.text();
+            status.className = resp.ok ? 'status success' : 'status error';
+            status.textContent = text;
+          }
+        } catch(err) {
+          status.className = 'status error';
+          status.textContent = 'Upload failed: ' + err;
+        }
+        btn.textContent = 'Upload';
+        btn.disabled = false;
+      });
+    }
+
+    // Encrypted upload
+    async function encryptedUpload(files, status) {
+      const key = await getKey();
+      if (!key) { status.className = 'status error'; status.textContent = 'No encryption key found'; return; }
+
+      const fd = new FormData();
+      for (const file of files) {
+        const buf = await file.arrayBuffer();
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf);
+        // Prepend IV to ciphertext
+        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(encrypted), iv.length);
+        fd.append('files', new Blob([combined]), file.name);
+      }
+      const resp = await fetch('/upload', { method: 'POST', body: fd });
+      const text = await resp.text();
+      status.className = resp.ok ? 'status success' : 'status error';
+      status.textContent = text;
+    }
+
+    // Encrypted download
+    async function decryptAndDownload(e) {
+      e.preventDefault();
+      const btn = document.getElementById('downloadBtn');
+      btn.textContent = 'Decrypting...';
+      try {
+        const key = await getKey();
+        if (!key) throw new Error('No encryption key');
+        const resp = await fetch('/download/{{.DownloadFile}}');
+        const buf = await resp.arrayBuffer();
+        const iv = new Uint8Array(buf.slice(0, 12));
+        const ciphertext = buf.slice(12);
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+        const blob = new Blob([plain]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '{{.DownloadFile}}';
+        a.click();
+        URL.revokeObjectURL(url);
+        btn.textContent = '✓ Downloaded';
+      } catch(err) {
+        btn.textContent = 'Download failed';
+        console.error(err);
+      }
+      setTimeout(() => btn.textContent = 'Download', 2000);
+    }
+  </script>
+</body>
+</html>
