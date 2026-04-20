@@ -1,5 +1,7 @@
 # Bifrost
 
+![Bifrost](bifrost.png)
+
 Bridge files between your computer and phone via QR code. No cloud, no cables, no apps — just scan and go.
 
 ## Features
