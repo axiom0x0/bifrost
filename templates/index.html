@@ -35,8 +35,14 @@
     .status.error { display: block; background: #1f0d0d; border: 1px solid #da3633; color: #f85149; }
     .divider { border: none; border-top: 1px solid #21262d; margin: 1.5rem 0; }
 
+    .progress-wrap { display: none; margin-top: 1rem; }
+    .progress-bar { width: 100%; height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+    .progress-fill { height: 100%; background: #58a6ff; border-radius: 4px; transition: width 0.2s; width: 0%; }
+    .progress-text { font-size: 0.8rem; color: #8b949e; margin-top: 0.25rem; text-align: right; }
+
     .encrypted-badge { display: inline-block; background: #1a1e2e; border: 1px solid #388bfd; color: #58a6ff; font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; margin-top: 0.5rem; }
   </style>
+  {{if .Encrypted}}<script src="/crypto.js?v={{.CacheBust}}"></script>{{end}}
 </head>
 <body>
   <div class="container">
@@ -53,8 +59,12 @@
         {{if .Encrypted}}
         <a href="#" class="btn-download" id="downloadBtn" onclick="decryptAndDownload(event)">Download</a>
         {{else}}
-        <a href="/download/{{.DownloadFile}}" class="btn-download">Download</a>
+        <a href="/download/{{.DownloadFile}}" class="btn-download" id="downloadBtn" onclick="trackDownload(event)">Download</a>
         {{end}}
+        <div class="progress-wrap" id="dlProgress">
+          <div class="progress-bar"><div class="progress-fill" id="dlFill"></div></div>
+          <div class="progress-text" id="dlText"></div>
+        </div>
       </div>
     </div>
     {{end}}
@@ -72,6 +82,10 @@
         <input type="file" id="files" name="files" multiple onchange="showFiles(this.files)">
         <div class="file-list" id="filelist"></div>
         <button type="submit" class="btn-upload" id="submit" disabled>Upload</button>
+        <div class="progress-wrap" id="ulProgress">
+          <div class="progress-bar"><div class="progress-fill" id="ulFill"></div></div>
+          <div class="progress-text" id="ulText"></div>
+        </div>
       </form>
       <div class="status" id="status"></div>
     </div>
@@ -81,13 +95,9 @@
   <script>
     const ENCRYPTED = {{.Encrypted}};
 
-    function getKey() {
-      const frag = window.location.hash.substring(1);
-      if (!frag) return null;
-      const raw = atob(frag.replace(/-/g,'+').replace(/_/g,'/'));
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-      return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt','decrypt']);
+    function getKeyBytes() {
+      if (!ENCRYPTED) return null;
+      return BifrostCrypto.parseKeyFromFragment();
     }
 
     function humanSize(b) {
@@ -96,6 +106,43 @@
       let i = -1;
       do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
       return b.toFixed(1) + ' ' + u[i];
+    }
+
+    function showProgress(fillId, textId, wrapId, loaded, total) {
+      const wrap = document.getElementById(wrapId);
+      const fill = document.getElementById(fillId);
+      const text = document.getElementById(textId);
+      wrap.style.display = 'block';
+      const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+      fill.style.width = pct + '%';
+      text.textContent = humanSize(loaded) + ' / ' + humanSize(total) + ' (' + pct + '%)';
+    }
+
+    // Download with progress (non-encrypted)
+    function trackDownload(e) {
+      e.preventDefault();
+      const btn = document.getElementById('downloadBtn');
+      btn.textContent = 'Downloading...';
+      const xhr = new XMLHttpRequest();
+      xhr.responseType = 'blob';
+      xhr.open('GET', '/download/{{.DownloadFile}}');
+      xhr.onprogress = function(e) {
+        if (e.lengthComputable) showProgress('dlFill', 'dlText', 'dlProgress', e.loaded, e.total);
+      };
+      xhr.onload = function() {
+        if (xhr.status === 200) {
+          const url = URL.createObjectURL(xhr.response);
+          const a = document.createElement('a');
+          a.href = url; a.download = '{{.DownloadFile}}'; a.click();
+          URL.revokeObjectURL(url);
+          btn.textContent = '✓ Downloaded';
+        } else {
+          btn.textContent = 'Download failed';
+        }
+        setTimeout(() => btn.textContent = 'Download', 2000);
+      };
+      xhr.onerror = function() { btn.textContent = 'Download failed'; };
+      xhr.send();
     }
 
     // Upload logic
@@ -113,6 +160,23 @@
       document.getElementById('submit').disabled = files.length === 0;
     }
 
+    function uploadWithProgress(formData, status) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload');
+        xhr.upload.onprogress = function(e) {
+          if (e.lengthComputable) showProgress('ulFill', 'ulText', 'ulProgress', e.loaded, e.total);
+        };
+        xhr.onload = function() {
+          status.className = xhr.status === 200 ? 'status success' : 'status error';
+          status.textContent = xhr.responseText;
+          resolve();
+        };
+        xhr.onerror = function() { reject(new Error('Network error')); };
+        xhr.send(formData);
+      });
+    }
+
     const form = document.getElementById('form');
     if (form) {
       form.addEventListener('submit', async e => {
@@ -125,14 +189,19 @@
 
         try {
           if (ENCRYPTED) {
-            await encryptedUpload(fi.files, status);
+            const keyBytes = getKeyBytes();
+            if (!keyBytes) { status.className = 'status error'; status.textContent = 'No encryption key found'; return; }
+            const fd = new FormData();
+            for (const file of fi.files) {
+              const buf = await file.arrayBuffer();
+              const encrypted = await BifrostCrypto.encrypt(keyBytes, new Uint8Array(buf));
+              fd.append('files', new Blob([encrypted]), file.name);
+            }
+            await uploadWithProgress(fd, status);
           } else {
             const fd = new FormData();
             for (const f of fi.files) fd.append('files', f);
-            const resp = await fetch('/upload', { method: 'POST', body: fd });
-            const text = await resp.text();
-            status.className = resp.ok ? 'status success' : 'status error';
-            status.textContent = text;
+            await uploadWithProgress(fd, status);
           }
         } catch(err) {
           status.className = 'status error';
@@ -143,41 +212,29 @@
       });
     }
 
-    // Encrypted upload
-    async function encryptedUpload(files, status) {
-      const key = await getKey();
-      if (!key) { status.className = 'status error'; status.textContent = 'No encryption key found'; return; }
-
-      const fd = new FormData();
-      for (const file of files) {
-        const buf = await file.arrayBuffer();
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf);
-        // Prepend IV to ciphertext
-        const combined = new Uint8Array(iv.length + encrypted.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(encrypted), iv.length);
-        fd.append('files', new Blob([combined]), file.name);
-      }
-      const resp = await fetch('/upload', { method: 'POST', body: fd });
-      const text = await resp.text();
-      status.className = resp.ok ? 'status success' : 'status error';
-      status.textContent = text;
-    }
-
-    // Encrypted download
+    // Encrypted download with progress
     async function decryptAndDownload(e) {
       e.preventDefault();
       const btn = document.getElementById('downloadBtn');
-      btn.textContent = 'Decrypting...';
+      btn.textContent = 'Downloading...';
       try {
-        const key = await getKey();
-        if (!key) throw new Error('No encryption key');
-        const resp = await fetch('/download/{{.DownloadFile}}');
-        const buf = await resp.arrayBuffer();
-        const iv = new Uint8Array(buf.slice(0, 12));
-        const ciphertext = buf.slice(12);
-        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+        var keyBytes = getKeyBytes();
+        if (!keyBytes) throw new Error('No encryption key found in URL');
+        const xhr = new XMLHttpRequest();
+        xhr.responseType = 'arraybuffer';
+        xhr.open('GET', '/download/{{.DownloadFile}}?t=' + Date.now());
+        xhr.onprogress = function(ev) {
+          if (ev.lengthComputable) showProgress('dlFill', 'dlText', 'dlProgress', ev.loaded, ev.total);
+        };
+        await new Promise((resolve, reject) => {
+          xhr.onload = resolve;
+          xhr.onerror = reject;
+          xhr.send();
+        });
+        if (xhr.status !== 200) throw new Error('Download failed (HTTP ' + xhr.status + ')');
+        btn.textContent = 'Decrypting...';
+        const cipherData = new Uint8Array(xhr.response);
+        const plain = await BifrostCrypto.decrypt(keyBytes, cipherData);
         const blob = new Blob([plain]);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -188,6 +245,8 @@
         btn.textContent = '✓ Downloaded';
       } catch(err) {
         btn.textContent = 'Download failed';
+        var st = document.getElementById('status');
+        if (st) { st.className = 'status error'; st.textContent = err.message || String(err); }
         console.error(err);
       }
       setTimeout(() => btn.textContent = 'Download', 2000);

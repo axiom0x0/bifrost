@@ -21,14 +21,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-//go:embed templates/*.html
+//go:embed templates/*.html templates/*.js
 var templateFS embed.FS
 
 var version = "dev"
+var cacheBust = strconv.FormatInt(time.Now().UnixMilli(), 36)
 
 const defaultPort = 8888
 
@@ -38,6 +40,7 @@ type config struct {
 	encrypt   bool
 	key       []byte // 32-byte AES-256 key
 	outputDir string
+	oneShot   bool
 }
 
 type pageData struct {
@@ -48,6 +51,7 @@ type pageData struct {
 	ShowUpload   bool
 	Directory    string
 	Files        []fileEntry
+	CacheBust    string
 }
 
 type fileEntry struct {
@@ -64,9 +68,10 @@ func main() {
 	outputDir := flag.String("o", ".", "output directory for received files")
 	dirPath := flag.String("d", "", "directory to browse and serve")
 	encrypt := flag.Bool("e", false, "enable end-to-end encryption")
+	oneShot := flag.Bool("1", false, "exit after first completed transfer")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "bifrost — bridge files to your phone via QR code\n\n")
+		fmt.Fprintf(os.Stderr, "bifrost %s — bridge files to your phone via QR code\n\n", version)
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  bifrost <file> [port]              send a file (+ upload)\n")
 		fmt.Fprintf(os.Stderr, "  bifrost -f <file> [-p port]        send a file (+ upload)\n")
@@ -117,6 +122,7 @@ func main() {
 		ip:      ip,
 		port:    *port,
 		encrypt: *encrypt,
+		oneShot: *oneShot,
 	}
 
 	if *encrypt {
@@ -199,7 +205,7 @@ func runSend(cfg *config, filePath string) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -209,13 +215,14 @@ func runSend(cfg *config, filePath string) {
 			DownloadFile: fileName,
 			DownloadSize: humanSize(info.Size()),
 			ShowUpload:   true,
+			CacheBust:    cacheBust,
 		})
 	})
 
 	mux.HandleFunc("/download/", func(w http.ResponseWriter, r *http.Request) {
 		reqFile := strings.TrimPrefix(r.URL.Path, "/download/")
 		if reqFile != fileName {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 
@@ -223,6 +230,7 @@ func runSend(cfg *config, filePath string) {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
 			w.Header().Set("Content-Length", strconv.Itoa(len(encryptedData)))
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 			w.Write(encryptedData)
 		} else {
 			contentType := mime.TypeByExtension(filepath.Ext(fileName))
@@ -234,9 +242,11 @@ func runSend(cfg *config, filePath string) {
 			http.ServeFile(w, r, absPath)
 		}
 		log.Printf("⬇ %s downloaded by %s", fileName, r.RemoteAddr)
+		oneShotExit(cfg)
 	})
 
 	mux.HandleFunc("/upload", makeUploadHandler(cfg))
+	serveCryptoJS(mux)
 
 	serve(cfg, mux)
 }
@@ -259,7 +269,7 @@ func runReceive(cfg *config) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -267,10 +277,12 @@ func runReceive(cfg *config) {
 			Hostname:   hostname,
 			Encrypted:  cfg.encrypt,
 			ShowUpload: true,
+			CacheBust:  cacheBust,
 		})
 	})
 
 	mux.HandleFunc("/upload", makeUploadHandler(cfg))
+	serveCryptoJS(mux)
 
 	serve(cfg, mux)
 }
@@ -294,7 +306,7 @@ func runBrowse(cfg *config, dirPath string) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 		files := listFiles(dirPath)
@@ -305,20 +317,21 @@ func runBrowse(cfg *config, dirPath string) {
 			ShowUpload: true,
 			Directory:  filepath.Base(dirPath),
 			Files:      files,
+			CacheBust:  cacheBust,
 		})
 	})
 
 	mux.HandleFunc("/download/", func(w http.ResponseWriter, r *http.Request) {
 		reqFile := strings.TrimPrefix(r.URL.Path, "/download/")
 		if reqFile == "" || strings.Contains(reqFile, "/") || strings.Contains(reqFile, "..") {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 
 		absFile := filepath.Join(dirPath, reqFile)
 		finfo, err := os.Stat(absFile)
 		if err != nil || finfo.IsDir() {
-			http.NotFound(w, r)
+			errorPage(w, "Not Found", http.StatusNotFound)
 			return
 		}
 
@@ -347,9 +360,11 @@ func runBrowse(cfg *config, dirPath string) {
 			http.ServeFile(w, r, absFile)
 		}
 		log.Printf("⬇ %s downloaded by %s", reqFile, r.RemoteAddr)
+		oneShotExit(cfg)
 	})
 
 	mux.HandleFunc("/upload", makeUploadHandler(cfg))
+	serveCryptoJS(mux)
 
 	serve(cfg, mux)
 }
@@ -415,6 +430,7 @@ func makeUploadHandler(cfg *config) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "✓ Received %d file(s): %s", len(saved), strings.Join(saved, ", "))
+		oneShotExit(cfg)
 	}
 }
 
@@ -598,12 +614,47 @@ func printBanner(cfg *config, mode, url string, info map[string]string) {
 	case "browse":
 		fmt.Println("Scan QR to browse and download files (uploads also accepted).")
 	}
-	fmt.Println("Press Ctrl+C to stop.\n")
+	fmt.Println("Press Ctrl+C to stop.")
+	fmt.Println()
 }
 
 func serve(cfg *config, mux *http.ServeMux) {
 	addr := fmt.Sprintf(":%d", cfg.port)
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+// serveCryptoJS registers the /crypto.js endpoint for the JS crypto library
+func serveCryptoJS(mux *http.ServeMux) {
+	mux.HandleFunc("/crypto.js", func(w http.ResponseWriter, r *http.Request) {
+		data, err := templateFS.ReadFile("templates/crypto.js")
+		if err != nil {
+			http.Error(w, "crypto.js not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(data)
+	})
+}
+
+// errorPage renders a styled error page
+func errorPage(w http.ResponseWriter, title string, code int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+.err{text-align:center}.err h1{font-size:4em;margin:0;color:#e94560}.err p{font-size:1.2em;color:#999}</style>
+</head><body><div class="err"><h1>%d</h1><p>%s</p></div></body></html>`, code, title)
+}
+
+// oneShotExit exits the process after a short delay (allows response to complete)
+func oneShotExit(cfg *config) {
+	if cfg.oneShot {
+		go func() {
+			log.Println("One-shot mode: shutting down")
+			os.Exit(0)
+		}()
+	}
 }
 
 func setupSignalHandler() {

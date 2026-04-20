@@ -33,6 +33,10 @@
     .status { margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none; font-size: 0.9rem; }
     .status.success { display: block; background: #0d1f0d; border: 1px solid #238636; color: #3fb950; }
     .status.error { display: block; background: #1f0d0d; border: 1px solid #da3633; color: #f85149; }
+    .progress-wrap { display: none; margin-top: 1rem; }
+    .progress-bar { width: 100%; height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+    .progress-fill { height: 100%; background: #58a6ff; border-radius: 4px; transition: width 0.2s; width: 0%; }
+    .progress-text { font-size: 0.8rem; color: #8b949e; margin-top: 0.25rem; text-align: right; }
     .empty { text-align: center; color: #8b949e; padding: 3rem; }
   </style>
 </head>
@@ -72,21 +76,22 @@
       <input type="file" id="files" name="files" multiple onchange="showFiles(this.files)">
       <div class="file-list" id="filelist"></div>
       <button type="submit" class="btn-upload" id="submit" disabled>Upload</button>
+      <div class="progress-wrap" id="ulProgress">
+        <div class="progress-bar"><div class="progress-fill" id="ulFill"></div></div>
+        <div class="progress-text" id="ulText"></div>
+      </div>
     </form>
     <div class="status" id="status"></div>
   </div>
   {{end}}
 
+  {{if .Encrypted}}<script src="/crypto.js?v={{.CacheBust}}"></script>{{end}}
   <script>
     const ENCRYPTED = {{.Encrypted}};
 
-    function getKey() {
-      const frag = window.location.hash.substring(1);
-      if (!frag) return null;
-      const raw = atob(frag.replace(/-/g,'+').replace(/_/g,'/'));
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-      return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt','decrypt']);
+    function getKeyBytes() {
+      if (!ENCRYPTED) return null;
+      return BifrostCrypto.parseKeyFromFragment();
     }
 
     function humanSize(b) {
@@ -97,22 +102,38 @@
       return b.toFixed(1) + ' ' + u[i];
     }
 
+    function showProgress(fillId, textId, wrapId, loaded, total) {
+      const wrap = document.getElementById(wrapId);
+      const fill = document.getElementById(fillId);
+      const text = document.getElementById(textId);
+      wrap.style.display = 'block';
+      const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+      fill.style.width = pct + '%';
+      text.textContent = humanSize(loaded) + ' / ' + humanSize(total) + ' (' + pct + '%)';
+    }
+
     async function decryptAndDownload(e, filename) {
       e.preventDefault();
+      const link = e.currentTarget;
+      const origText = link.querySelector('.file-dl').textContent;
+      link.querySelector('.file-dl').textContent = '⏳';
       try {
-        const key = await getKey();
-        if (!key) throw new Error('No encryption key');
-        const resp = await fetch('/download/' + filename);
+        const keyBytes = getKeyBytes();
+        if (!keyBytes) throw new Error('No encryption key');
+        const resp = await fetch('/download/' + filename + '?t=' + Date.now());
         const buf = await resp.arrayBuffer();
-        const iv = new Uint8Array(buf.slice(0, 12));
-        const ciphertext = buf.slice(12);
-        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+        const plain = await BifrostCrypto.decrypt(keyBytes, new Uint8Array(buf));
         const blob = new Blob([plain]);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url; a.download = filename; a.click();
         URL.revokeObjectURL(url);
-      } catch(err) { alert('Download failed: ' + err); }
+        link.querySelector('.file-dl').textContent = '✓';
+      } catch(err) {
+        alert('Download failed: ' + err);
+        link.querySelector('.file-dl').textContent = '✗';
+      }
+      setTimeout(() => link.querySelector('.file-dl').textContent = origText, 2000);
     }
 
     // Upload logic
@@ -128,6 +149,25 @@
       list.innerHTML = Array.from(files).map(f => '• ' + f.name + ' (' + humanSize(f.size) + ')').join('<br>');
       document.getElementById('submit').disabled = files.length === 0;
     }
+
+    function uploadWithProgress(formData, status) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload');
+        xhr.upload.onprogress = function(e) {
+          if (e.lengthComputable) showProgress('ulFill', 'ulText', 'ulProgress', e.loaded, e.total);
+        };
+        xhr.onload = function() {
+          status.className = xhr.status === 200 ? 'status success' : 'status error';
+          status.textContent = xhr.responseText;
+          if (xhr.status === 200) setTimeout(() => location.reload(), 1500);
+          resolve();
+        };
+        xhr.onerror = function() { reject(new Error('Network error')); };
+        xhr.send(formData);
+      });
+    }
+
     const form = document.getElementById('form');
     if (form) {
       form.addEventListener('submit', async e => {
@@ -138,23 +178,17 @@
         try {
           const fd = new FormData();
           if (ENCRYPTED) {
-            const key = await getKey();
+            const keyBytes = getKeyBytes();
+            if (!keyBytes) throw new Error('No encryption key');
             for (const file of fi.files) {
               const buf = await file.arrayBuffer();
-              const iv = crypto.getRandomValues(new Uint8Array(12));
-              const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf);
-              const combined = new Uint8Array(iv.length + enc.byteLength);
-              combined.set(iv); combined.set(new Uint8Array(enc), iv.length);
-              fd.append('files', new Blob([combined]), file.name);
+              const encrypted = await BifrostCrypto.encrypt(keyBytes, new Uint8Array(buf));
+              fd.append('files', new Blob([encrypted]), file.name);
             }
           } else {
             for (const f of fi.files) fd.append('files', f);
           }
-          const resp = await fetch('/upload', { method: 'POST', body: fd });
-          const text = await resp.text();
-          status.className = resp.ok ? 'status success' : 'status error';
-          status.textContent = text;
-          if (resp.ok) setTimeout(() => location.reload(), 1500);
+          await uploadWithProgress(fd, status);
         } catch(err) { status.className = 'status error'; status.textContent = 'Upload failed: ' + err; }
         btn.textContent = 'Upload'; btn.disabled = false;
       });
