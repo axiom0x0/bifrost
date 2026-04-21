@@ -109,6 +109,19 @@ Generates a random AES-256-GCM key and embeds it in the QR code's URL fragment (
 
 No internet required — works entirely on your local network.
 
+## Comparison
+
+| Tool | Receiver needs install | Encryption | QR code | Works over internet |
+|------|----------------------|------------|---------|-------------------|
+| [LocalSend](https://localsend.org) | Yes | Yes | No | No |
+| [Croc](https://github.com/schollz/croc) | Yes | Yes | No | Yes (relay) |
+| [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) | Yes | Yes | No | Yes (relay) |
+| [KDE Connect](https://kdeconnect.kde.org) | Yes | Yes | No | No |
+| [qrcp](https://github.com/claudiodangelis/qrcp) | No | No | Yes | No |
+| **Bifrost** | **No** | **Yes** | **Yes** | **No** |
+
+Bifrost's niche: the receiver only needs a camera and a browser. No app, no account, no pairing.
+
 ## License
 
 MIT
